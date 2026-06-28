@@ -1,0 +1,60 @@
+{
+  "name": "basic_momentum_v1",
+  "description": "Buy large-cap tech names when their price and volume momentum confirm while QQQ has positive short-term trend.",
+  "timeframe": "1d",
+  "universe": {
+    "type": "static_list",
+    "symbols": ["AAPL", "MSFT", "NVDA", "AMD", "META"]
+  },
+  "entry": {
+    "all": [
+      {
+        "op": ">",
+        "left": { "indicator": "close" },
+        "right": { "indicator": "sma", "source": "close", "window": 20 }
+      },
+      {
+        "op": ">",
+        "left": { "indicator": "volume" },
+        "right": {
+          "op": "*",
+          "left": { "indicator": "sma", "source": "volume", "window": 20 },
+          "right": 1.5
+        }
+      },
+      {
+        "op": ">",
+        "left": { "indicator": "return", "source": "close", "symbol": "QQQ", "window": 5 },
+        "right": 0
+      }
+    ]
+  },
+  "exit": {
+    "any": [
+      {
+        "op": ">=",
+        "left": { "field": "holding_days" },
+        "right": 10
+      },
+      {
+        "op": "<",
+        "left": { "indicator": "close" },
+        "right": { "indicator": "sma", "source": "close", "window": 10 }
+      },
+      {
+        "op": "<=",
+        "left": { "field": "position_return" },
+        "right": -0.08
+      }
+    ]
+  },
+  "risk": {
+    "max_position_pct": 0.05,
+    "max_positions": 5,
+    "execution": "next_open",
+    "slippage_bps": 5,
+    "commission_bps": 1,
+    "stop_loss_pct": -0.08,
+    "take_profit_pct": 0.15
+  }
+}
