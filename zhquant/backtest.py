@@ -365,6 +365,7 @@ class LongOnlyBacktester:
         metrics: dict[str, float | int | None] = {
             "initial_cash": self.initial_cash,
             "final_equity": float(equity.iloc[-1]),
+            "net_profit": float(equity.iloc[-1] - self.initial_cash),
             "total_return": float(total_return),
             "cagr": cagr,
             "sharpe": sharpe,
@@ -378,8 +379,15 @@ class LongOnlyBacktester:
                 {
                     "win_rate": None,
                     "avg_return_per_trade": None,
+                    "avg_pnl_per_trade": None,
                     "avg_win": None,
                     "avg_loss": None,
+                    "gross_profit": 0.0,
+                    "gross_loss": 0.0,
+                    "profit_factor": None,
+                    "winning_trades": 0,
+                    "losing_trades": 0,
+                    "total_commission": 0.0,
                     "best_trade": None,
                     "worst_trade": None,
                 }
@@ -387,14 +395,26 @@ class LongOnlyBacktester:
             return metrics
 
         returns = trade_log["net_return"]
+        pnl = trade_log["net_pnl"]
         wins = returns[returns > 0]
         losses = returns[returns < 0]
+        winning_pnl = pnl[pnl > 0]
+        losing_pnl = pnl[pnl < 0]
+        gross_profit = float(winning_pnl.sum()) if not winning_pnl.empty else 0.0
+        gross_loss = float(abs(losing_pnl.sum())) if not losing_pnl.empty else 0.0
         metrics.update(
             {
                 "win_rate": float((returns > 0).mean()),
                 "avg_return_per_trade": float(returns.mean()),
+                "avg_pnl_per_trade": float(pnl.mean()),
                 "avg_win": float(wins.mean()) if not wins.empty else None,
                 "avg_loss": float(losses.mean()) if not losses.empty else None,
+                "gross_profit": gross_profit,
+                "gross_loss": gross_loss,
+                "profit_factor": gross_profit / gross_loss if gross_loss > 0 else None,
+                "winning_trades": int((pnl > 0).sum()),
+                "losing_trades": int((pnl < 0).sum()),
+                "total_commission": float(trade_log["total_commission"].sum()),
                 "best_trade": float(returns.max()),
                 "worst_trade": float(returns.min()),
             }
@@ -417,4 +437,3 @@ def run_backtest(
         ).run()
     except CompilerError as exc:
         raise BacktestError(str(exc)) from exc
-

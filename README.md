@@ -78,6 +78,26 @@ print(result.trade_log)
 print(result.metrics)
 ```
 
+Or run it directly from the command line with yfinance data:
+
+```powershell
+python -m zhquant.backtest_cli strategies/basic_momentum.json AAPL --period 1mo
+```
+
+For a simpler single-stock demo strategy:
+
+```powershell
+python -m zhquant.backtest_cli strategies/simple_sma_pullback.json AAPL --period 1mo
+```
+
+With explicit dates:
+
+```powershell
+python -m zhquant.backtest_cli strategies/basic_momentum.json NVDA --start 2024-01-01 --end 2024-06-01 --initial-cash 100000
+```
+
+The CLI overrides the strategy universe with the ticker you pass in, while still downloading referenced benchmark symbols such as `QQQ`.
+
 The result contains:
 
 ```text
@@ -86,4 +106,3 @@ trade_log
 metrics
 compiled
 ```
-

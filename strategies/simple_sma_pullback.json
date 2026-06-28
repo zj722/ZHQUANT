@@ -1,0 +1,37 @@
+{
+  "name": "simple_sma_pullback_v1",
+  "description": "A minimal single-stock template: buy when price is above its 5-day SMA, then exit on 5 trading days, SMA breakdown, stop loss, or take profit.",
+  "timeframe": "1d",
+  "universe": {
+    "type": "static_list",
+    "symbols": ["AAPL"]
+  },
+  "entry": {
+    "op": ">",
+    "left": { "indicator": "close" },
+    "right": { "indicator": "sma", "source": "close", "window": 5 }
+  },
+  "exit": {
+    "any": [
+      {
+        "op": ">=",
+        "left": { "field": "holding_days" },
+        "right": 5
+      },
+      {
+        "op": "<",
+        "left": { "indicator": "close" },
+        "right": { "indicator": "sma", "source": "close", "window": 5 }
+      }
+    ]
+  },
+  "risk": {
+    "max_position_pct": 1.0,
+    "max_positions": 1,
+    "execution": "next_open",
+    "slippage_bps": 5,
+    "commission_bps": 1,
+    "stop_loss_pct": -0.05,
+    "take_profit_pct": 0.08
+  }
+}
