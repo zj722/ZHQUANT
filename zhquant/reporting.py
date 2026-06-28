@@ -126,6 +126,57 @@ def format_batch_report(rows: list[dict[str, object]], strategy_path: str | Path
     return "\n".join(lines)
 
 
+def format_strategy_batch_report(
+    summary: pd.DataFrame,
+    strategy_path: str | Path,
+    period_label: str,
+    output_dir: Path | None = None,
+) -> str:
+    lines = [
+        "ZHQUANT Strategy Batch",
+        "=" * 23,
+        f"Strategies: {strategy_path}",
+        f"Period: {period_label}",
+    ]
+    if output_dir:
+        lines.append(f"Saved To: {output_dir}")
+    lines.append("")
+
+    if summary.empty:
+        lines.append("No strategy results.")
+        return "\n".join(lines)
+
+    display = summary.copy()
+    for column in [
+        "pass_rate",
+        "avg_strategy_return",
+        "avg_buy_hold_return",
+        "avg_excess_return",
+        "avg_max_drawdown",
+        "avg_exposure_time",
+    ]:
+        display[column] = display[column].map(_pct)
+    for column in ["avg_score", "avg_sharpe"]:
+        display[column] = display[column].map(_number)
+
+    columns = [
+        "strategy_name",
+        "verdict",
+        "avg_score",
+        "pass_rate",
+        "avg_strategy_return",
+        "avg_buy_hold_return",
+        "avg_excess_return",
+        "avg_max_drawdown",
+        "avg_sharpe",
+        "avg_exposure_time",
+        "total_trades",
+        "tickers_tested",
+    ]
+    lines.append(display.loc[:, columns].to_string(index=False))
+    return "\n".join(lines)
+
+
 def _trade_log_table(trade_log: pd.DataFrame) -> str:
     display = trade_log.copy()
     display["entry_date"] = pd.to_datetime(display["entry_date"]).dt.strftime("%Y-%m-%d")

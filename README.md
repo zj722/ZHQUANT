@@ -127,3 +127,20 @@ Single ticker reports include:
 - PASS/FAIL verdict and score
 
 Batch reports summarize those fields across tickers.
+
+## Run A Strategy Directory
+
+LLM-generated strategies should be stored as one JSON file per strategy. You can run a whole directory:
+
+```powershell
+python -m zhquant.strategy_batch_cli strategies --tickers AAPL,MSFT,NVDA,MU,AMD --start 2024-01-01 --end 2024-06-01
+```
+
+The command prints a strategy leaderboard and saves:
+
+```text
+results/runs/<timestamp>/summary.csv
+results/runs/<timestamp>/details.json
+```
+
+`summary.csv` is for ranking strategies. `details.json` keeps ticker-level metrics and score reasons for feeding back into the next LLM generation round.

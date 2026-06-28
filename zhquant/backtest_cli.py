@@ -51,7 +51,7 @@ def main(argv: list[str] | None = None) -> int:
 
     period_label = f"{args.start or ''} to {args.end or ''}".strip() if args.start or args.end else args.period
     if len(results) > 1:
-        rows = [_batch_row(ticker, result) for ticker, result in results.items()]
+        rows = [backtest_result_row(ticker, result) for ticker, result in results.items()]
         print(format_batch_report(rows, strategy_path=args.strategy, period_label=period_label))
         return 0
 
@@ -88,7 +88,7 @@ def _parse_tickers(ticker: str | None, tickers: str | None) -> list[str]:
     return normalized
 
 
-def _batch_row(ticker: str, result: Any) -> dict[str, object]:
+def backtest_result_row(ticker: str, result: Any) -> dict[str, object]:
     metrics = result.metrics
     benchmark = result.benchmark_metrics or {}
     score = result.score or {}
