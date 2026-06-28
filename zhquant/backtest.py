@@ -28,8 +28,10 @@ class BacktestResult:
     strategy_name: str
     equity_curve: pd.DataFrame
     trade_log: pd.DataFrame
-    metrics: dict[str, float | int | None]
+    metrics: dict[str, Any]
     compiled: CompiledSignals
+    benchmark_metrics: dict[str, Any] | None = None
+    score: dict[str, Any] | None = None
 
 
 class LongOnlyBacktester:
@@ -121,6 +123,8 @@ class LongOnlyBacktester:
         equity_curve = pd.DataFrame(self.equity_rows).drop_duplicates("date", keep="last").set_index("date")
         trade_log = pd.DataFrame(self.trade_rows)
         metrics = self._metrics(equity_curve, trade_log)
+        benchmark_metrics = self._benchmark_metrics() if len(self.symbols) == 1 else None
+        score = score_strategy(metrics, benchmark_metrics)
 
         return BacktestResult(
             strategy_name=self.strategy["name"],
@@ -128,6 +132,8 @@ class LongOnlyBacktester:
             trade_log=trade_log,
             metrics=metrics,
             compiled=self.compiled,
+            benchmark_metrics=benchmark_metrics,
+            score=score,
         )
 
     def _collect_exit_orders(self, signal_date: pd.Timestamp) -> dict[str, str]:
@@ -344,7 +350,7 @@ class LongOnlyBacktester:
         matrix = self.open_prices if field == "open" else self.close_prices
         return float(matrix.loc[date, symbol])
 
-    def _metrics(self, equity_curve: pd.DataFrame, trade_log: pd.DataFrame) -> dict[str, float | int | None]:
+    def _metrics(self, equity_curve: pd.DataFrame, trade_log: pd.DataFrame) -> dict[str, Any]:
         if equity_curve.empty:
             return {}
 
@@ -354,6 +360,10 @@ class LongOnlyBacktester:
         sharpe = None
         if not daily_returns.empty and daily_returns.std(ddof=0) > 0:
             sharpe = float((daily_returns.mean() / daily_returns.std(ddof=0)) * np.sqrt(252))
+        downside = daily_returns[daily_returns < 0]
+        sortino = None
+        if not downside.empty and downside.std(ddof=0) > 0:
+            sortino = float((daily_returns.mean() / downside.std(ddof=0)) * np.sqrt(252))
 
         drawdown = equity / equity.cummax() - 1.0
         max_drawdown = float(drawdown.min())
@@ -361,15 +371,22 @@ class LongOnlyBacktester:
         elapsed_days = max((equity.index[-1] - equity.index[0]).days, 1)
         years = elapsed_days / 365.25
         cagr = float((equity.iloc[-1] / self.initial_cash) ** (1 / years) - 1) if years > 0 else None
+        calmar = cagr / abs(max_drawdown) if cagr is not None and max_drawdown < 0 else None
+        exposure_time = float((equity_curve["open_positions"] > 0).mean()) if "open_positions" in equity_curve else None
+        monthly_returns = equity.resample("ME").last().pct_change().dropna()
 
-        metrics: dict[str, float | int | None] = {
+        metrics: dict[str, Any] = {
             "initial_cash": self.initial_cash,
             "final_equity": float(equity.iloc[-1]),
             "net_profit": float(equity.iloc[-1] - self.initial_cash),
             "total_return": float(total_return),
             "cagr": cagr,
             "sharpe": sharpe,
+            "sortino": sortino,
+            "calmar": calmar,
             "max_drawdown": max_drawdown,
+            "exposure_time": exposure_time,
+            "monthly_returns": {idx.strftime("%Y-%m"): float(value) for idx, value in monthly_returns.items()},
             "trade_count": int(len(trade_log)),
             "trades_per_year": float(len(trade_log) / years) if years > 0 else None,
         }
@@ -388,6 +405,10 @@ class LongOnlyBacktester:
                     "winning_trades": 0,
                     "losing_trades": 0,
                     "total_commission": 0.0,
+                    "avg_holding_days": None,
+                    "median_trade_return": None,
+                    "max_consecutive_losses": 0,
+                    "worst_5_trades": [],
                     "best_trade": None,
                     "worst_trade": None,
                 }
@@ -415,11 +436,145 @@ class LongOnlyBacktester:
                 "winning_trades": int((pnl > 0).sum()),
                 "losing_trades": int((pnl < 0).sum()),
                 "total_commission": float(trade_log["total_commission"].sum()),
+                "avg_holding_days": float(trade_log["holding_days"].mean()),
+                "median_trade_return": float(returns.median()),
+                "max_consecutive_losses": _max_consecutive_losses(pnl),
+                "worst_5_trades": [
+                    {
+                        "symbol": str(row["symbol"]),
+                        "exit_date": str(pd.Timestamp(row["exit_date"]).date()),
+                        "net_pnl": float(row["net_pnl"]),
+                        "net_return": float(row["net_return"]),
+                    }
+                    for _, row in trade_log.nsmallest(min(5, len(trade_log)), "net_return").iterrows()
+                ],
                 "best_trade": float(returns.max()),
                 "worst_trade": float(returns.min()),
             }
         )
         return metrics
+
+    def _benchmark_metrics(self) -> dict[str, Any]:
+        symbol = self.symbols[0]
+        open_prices = self.open_prices[symbol].dropna()
+        close_prices = self.close_prices[symbol].dropna()
+        shared_index = open_prices.index.intersection(close_prices.index)
+        if shared_index.empty:
+            return {}
+
+        first_date = shared_index[0]
+        first_open = float(open_prices.loc[first_date])
+        if first_open <= 0:
+            return {}
+
+        entry_price = first_open * (1.0 + self.slippage_rate)
+        max_notional = self.initial_cash / (1.0 + self.commission_rate)
+        shares = max_notional / entry_price
+        entry_commission = max_notional * self.commission_rate
+        cash = self.initial_cash - max_notional - entry_commission
+
+        close_series = close_prices.reindex(shared_index)
+        equity = cash + shares * close_series
+        final_exit_price = float(close_series.iloc[-1]) * (1.0 - self.slippage_rate)
+        final_proceeds = shares * final_exit_price
+        exit_commission = final_proceeds * self.commission_rate
+        final_equity_after_exit = cash + final_proceeds - exit_commission
+        equity.iloc[-1] = final_equity_after_exit
+
+        total_return = final_equity_after_exit / self.initial_cash - 1.0
+        drawdown = equity / equity.cummax() - 1.0
+        daily_returns = equity.pct_change().dropna()
+        sharpe = None
+        if not daily_returns.empty and daily_returns.std(ddof=0) > 0:
+            sharpe = float((daily_returns.mean() / daily_returns.std(ddof=0)) * np.sqrt(252))
+
+        return {
+            "symbol": symbol,
+            "initial_cash": self.initial_cash,
+            "final_equity": float(final_equity_after_exit),
+            "net_profit": float(final_equity_after_exit - self.initial_cash),
+            "total_return": float(total_return),
+            "max_drawdown": float(drawdown.min()),
+            "sharpe": sharpe,
+            "total_commission": float(entry_commission + exit_commission),
+        }
+
+
+def score_strategy(metrics: dict[str, Any], benchmark_metrics: dict[str, Any] | None = None) -> dict[str, Any]:
+    total_return = _metric(metrics, "total_return")
+    max_drawdown = _metric(metrics, "max_drawdown")
+    sharpe = _metric(metrics, "sharpe")
+    trade_count = int(metrics.get("trade_count") or 0)
+    exposure = _metric(metrics, "exposure_time")
+    benchmark_return = _metric(benchmark_metrics or {}, "total_return")
+    excess_return = total_return - benchmark_return if benchmark_return is not None else None
+
+    return_score = _clamp(total_return / 0.25, -1, 1) * 25 if total_return is not None else 0
+    drawdown_score = _clamp((0.30 + max_drawdown) / 0.30, 0, 1) * 20 if max_drawdown is not None else 0
+    sharpe_score = _clamp((sharpe or 0) / 2.0, -1, 1) * 20
+    trade_count_score = _clamp(trade_count / 20, 0, 1) * 15
+    benchmark_score = _clamp((excess_return or 0) / 0.15, -1, 1) * 15 if excess_return is not None else 0
+    exposure_bonus = 5 if exposure is not None and 0 < exposure < 0.75 and total_return and total_return > 0 else 0
+    score = return_score + drawdown_score + sharpe_score + trade_count_score + benchmark_score + exposure_bonus
+    score = float(_clamp(score, 0, 100))
+
+    reasons: list[str] = []
+    failures: list[str] = []
+    _reason(total_return is not None and total_return > 0, "Return positive", reasons, failures)
+    _reason(max_drawdown is not None and max_drawdown >= -0.25, "Max drawdown acceptable", reasons, failures)
+    _reason(trade_count >= 3, "Trade count sufficient", reasons, failures)
+    if benchmark_return is not None:
+        _reason(excess_return is not None and excess_return > 0, "Beats buy and hold", reasons, failures)
+    if sharpe is not None:
+        _reason(sharpe > 0.5, "Sharpe above threshold", reasons, failures)
+
+    verdict = "PASS" if score >= 60 and not failures else "FAIL"
+    return {
+        "score": score,
+        "verdict": verdict,
+        "reasons": reasons,
+        "failures": failures,
+        "components": {
+            "return_score": float(return_score),
+            "drawdown_score": float(drawdown_score),
+            "sharpe_score": float(sharpe_score),
+            "trade_count_score": float(trade_count_score),
+            "benchmark_score": float(benchmark_score),
+            "exposure_bonus": float(exposure_bonus),
+            "complexity_penalty": 0.0,
+        },
+        "excess_return": excess_return,
+    }
+
+
+def _metric(metrics: dict[str, Any], key: str) -> float | None:
+    value = metrics.get(key)
+    if value is None:
+        return None
+    return float(value)
+
+
+def _clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(upper, value))
+
+
+def _reason(condition: bool, message: str, reasons: list[str], failures: list[str]) -> None:
+    if condition:
+        reasons.append(message)
+    else:
+        failures.append(message)
+
+
+def _max_consecutive_losses(pnl: pd.Series) -> int:
+    max_streak = 0
+    current = 0
+    for value in pnl:
+        if value < 0:
+            current += 1
+            max_streak = max(max_streak, current)
+        else:
+            current = 0
+    return max_streak
 
 
 def run_backtest(

@@ -85,6 +85,10 @@ class BacktestTest(unittest.TestCase):
         self.assertGreater(trade["net_pnl"], 0)
         self.assertGreater(result.metrics["final_equity"], 10_000)
         self.assertEqual(result.metrics["trade_count"], 1)
+        self.assertIn("total_return", result.benchmark_metrics)
+        self.assertIn(result.score["verdict"], {"PASS", "FAIL"})
+        self.assertIn("exposure_time", result.metrics)
+        self.assertIn("sortino", result.metrics)
 
     def test_stop_loss_risk_exit(self) -> None:
         strategy = base_strategy(

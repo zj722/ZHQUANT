@@ -10,13 +10,14 @@ from typing import Any
 from .backtest import BacktestError, run_backtest
 from .data_loader import DataLoadError, download_yfinance_ohlcv
 from .dsl_validator import DSLValidationError, StrategyDSLValidator
-from .reporting import format_backtest_report
+from .reporting import format_backtest_report, format_batch_report
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run a ZHQUANT strategy backtest using yfinance data.")
     parser.add_argument("strategy", help="Path to strategy DSL JSON.")
-    parser.add_argument("ticker", help="Ticker to backtest, for example AAPL or NVDA.")
+    parser.add_argument("ticker", nargs="?", help="Ticker to backtest, for example AAPL or NVDA.")
+    parser.add_argument("--tickers", help="Comma-separated tickers for batch mode, for example AAPL,MSFT,NVDA,MU,AMD.")
     parser.add_argument("--period", default="1mo", help="yfinance period, for example 1mo, 3mo, 1y. Ignored if --start is set.")
     parser.add_argument("--start", help="Start date YYYY-MM-DD.")
     parser.add_argument("--end", help="End date YYYY-MM-DD.")
@@ -25,23 +26,37 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        strategy = _load_strategy(Path(args.strategy))
-        ticker = args.ticker.upper()
-        strategy = _override_universe(strategy, ticker)
-        required_symbols = _required_symbols(strategy)
+        base_strategy = _load_strategy(Path(args.strategy))
+        tickers = _parse_tickers(args.ticker, args.tickers)
+        required_symbols = set()
+        strategies_by_ticker: dict[str, dict[str, Any]] = {}
+        for ticker in tickers:
+            strategy = _override_universe(base_strategy, ticker)
+            strategies_by_ticker[ticker] = strategy
+            required_symbols.update(_required_symbols(strategy))
         market_data = download_yfinance_ohlcv(
-            required_symbols,
+            sorted(required_symbols),
             period=args.period,
             start=args.start,
             end=args.end,
             interval="1d",
         )
-        result = run_backtest(strategy, market_data, initial_cash=args.initial_cash)
+        results = {
+            ticker: run_backtest(strategy, market_data, initial_cash=args.initial_cash)
+            for ticker, strategy in strategies_by_ticker.items()
+        }
     except (OSError, json.JSONDecodeError, DSLValidationError, DataLoadError, BacktestError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
     period_label = f"{args.start or ''} to {args.end or ''}".strip() if args.start or args.end else args.period
+    if len(results) > 1:
+        rows = [_batch_row(ticker, result) for ticker, result in results.items()]
+        print(format_batch_report(rows, strategy_path=args.strategy, period_label=period_label))
+        return 0
+
+    ticker = next(iter(results))
+    result = results[ticker]
     print(
         format_backtest_report(
             result=result,
@@ -52,6 +67,47 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
     return 0
+
+
+def _parse_tickers(ticker: str | None, tickers: str | None) -> list[str]:
+    values: list[str] = []
+    if ticker:
+        values.append(ticker)
+    if tickers:
+        values.extend(item.strip() for item in tickers.split(","))
+    normalized = []
+    seen = set()
+    for value in values:
+        symbol = value.strip().upper()
+        if not symbol or symbol in seen:
+            continue
+        normalized.append(symbol)
+        seen.add(symbol)
+    if not normalized:
+        raise DataLoadError("Provide a ticker positional argument or --tickers AAPL,MSFT")
+    return normalized
+
+
+def _batch_row(ticker: str, result: Any) -> dict[str, object]:
+    metrics = result.metrics
+    benchmark = result.benchmark_metrics or {}
+    score = result.score or {}
+    return {
+        "ticker": ticker,
+        "verdict": score.get("verdict"),
+        "score": score.get("score"),
+        "strategy_return": metrics.get("total_return"),
+        "buy_hold_return": benchmark.get("total_return"),
+        "excess_return": score.get("excess_return"),
+        "max_drawdown": metrics.get("max_drawdown"),
+        "sharpe": metrics.get("sharpe"),
+        "exposure_time": metrics.get("exposure_time"),
+        "trades": metrics.get("trade_count"),
+        "win_rate": metrics.get("win_rate"),
+        "net_profit": metrics.get("net_profit"),
+        "gross_profit": metrics.get("gross_profit"),
+        "gross_loss": metrics.get("gross_loss"),
+    }
 
 
 def _load_strategy(path: Path) -> dict[str, Any]:
@@ -92,4 +148,3 @@ def _walk_symbol_refs(value: Any) -> set[str]:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

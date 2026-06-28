@@ -15,6 +15,8 @@ def format_backtest_report(
     max_trades: int = 10,
 ) -> str:
     metrics = result.metrics
+    benchmark = result.benchmark_metrics or {}
+    score = result.score or {}
     lines = [
         "ZHQUANT Backtest Result",
         "=" * 24,
@@ -31,25 +33,49 @@ def format_backtest_report(
         f"Total Return: {_pct(metrics.get('total_return'))}",
         f"Max Drawdown: {_pct_plain(metrics.get('max_drawdown'))}",
         f"Sharpe: {_number(metrics.get('sharpe'))}",
+        f"Sortino: {_number(metrics.get('sortino'))}",
+        f"Calmar: {_number(metrics.get('calmar'))}",
+        f"Exposure Time: {_pct_plain(metrics.get('exposure_time'))}",
         "",
-        "Money Made / Lost",
-        "-" * 17,
-        f"Gross Profit From Winning Trades: {_money(metrics.get('gross_profit'))}",
-        f"Gross Loss From Losing Trades: {_money(metrics.get('gross_loss'))}",
-        f"Total Commission: {_money(metrics.get('total_commission'))}",
-        f"Average P/L Per Trade: {_signed_money(metrics.get('avg_pnl_per_trade'))}",
+        "Benchmark",
+        "-" * 9,
+        f"Buy & Hold Return: {_pct(benchmark.get('total_return'))}",
+        f"Buy & Hold Max Drawdown: {_pct_plain(benchmark.get('max_drawdown'))}",
+        f"Excess Return: {_pct(score.get('excess_return'))}",
         "",
-        "Trades",
-        "-" * 6,
-        f"Trade Count: {metrics.get('trade_count', 0)}",
-        f"Winning Trades: {metrics.get('winning_trades', 0)}",
-        f"Losing Trades: {metrics.get('losing_trades', 0)}",
-        f"Win Rate: {_pct_plain(metrics.get('win_rate'))}",
-        f"Average Return / Trade: {_pct(metrics.get('avg_return_per_trade'))}",
-        f"Best Trade: {_pct(metrics.get('best_trade'))}",
-        f"Worst Trade: {_pct(metrics.get('worst_trade'))}",
-        f"Trades / Year: {_number(metrics.get('trades_per_year'))}",
+        "Strategy Score",
+        "-" * 14,
+        f"Score: {_number(score.get('score'))}",
+        f"Verdict: {score.get('verdict', 'N/A')}",
     ]
+    lines.extend(_reason_lines("Pass Reasons", score.get("reasons")))
+    lines.extend(_reason_lines("Fail Reasons", score.get("failures")))
+    lines.extend(
+        [
+            "",
+            "Money Made / Lost",
+            "-" * 17,
+            f"Gross Profit From Winning Trades: {_money(metrics.get('gross_profit'))}",
+            f"Gross Loss From Losing Trades: {_money(metrics.get('gross_loss'))}",
+            f"Total Commission: {_money(metrics.get('total_commission'))}",
+            f"Average P/L Per Trade: {_signed_money(metrics.get('avg_pnl_per_trade'))}",
+            "",
+            "Trades",
+            "-" * 6,
+            f"Trade Count: {metrics.get('trade_count', 0)}",
+            f"Winning Trades: {metrics.get('winning_trades', 0)}",
+            f"Losing Trades: {metrics.get('losing_trades', 0)}",
+            f"Win Rate: {_pct_plain(metrics.get('win_rate'))}",
+            f"Average Return / Trade: {_pct(metrics.get('avg_return_per_trade'))}",
+            f"Median Return / Trade: {_pct(metrics.get('median_trade_return'))}",
+            f"Average Holding Days: {_number(metrics.get('avg_holding_days'))}",
+            f"Max Consecutive Losses: {metrics.get('max_consecutive_losses', 0)}",
+            f"Profit Factor: {_number(metrics.get('profit_factor'))}",
+            f"Best Trade: {_pct(metrics.get('best_trade'))}",
+            f"Worst Trade: {_pct(metrics.get('worst_trade'))}",
+            f"Trades / Year: {_number(metrics.get('trades_per_year'))}",
+        ]
+    )
 
     if not result.trade_log.empty:
         lines.extend(["", f"Trade Log (last {max_trades})", "-" * 20])
@@ -57,6 +83,46 @@ def format_backtest_report(
     else:
         lines.extend(["", "Trade Log", "-" * 9, "No completed trades in this period."])
 
+    return "\n".join(lines)
+
+
+def format_batch_report(rows: list[dict[str, object]], strategy_path: str | Path, period_label: str) -> str:
+    lines = [
+        "ZHQUANT Batch Backtest",
+        "=" * 22,
+        f"Strategy file: {strategy_path}",
+        f"Period: {period_label}",
+        "",
+    ]
+    if not rows:
+        lines.append("No results.")
+        return "\n".join(lines)
+
+    display = pd.DataFrame(rows).copy()
+    for column in ["strategy_return", "buy_hold_return", "excess_return", "max_drawdown", "exposure_time", "win_rate"]:
+        display[column] = display[column].map(_pct)
+    for column in ["net_profit", "gross_profit", "gross_loss"]:
+        display[column] = display[column].map(_signed_money)
+    for column in ["score", "sharpe"]:
+        display[column] = display[column].map(_number)
+
+    columns = [
+        "ticker",
+        "verdict",
+        "score",
+        "strategy_return",
+        "buy_hold_return",
+        "excess_return",
+        "max_drawdown",
+        "sharpe",
+        "exposure_time",
+        "trades",
+        "win_rate",
+        "net_profit",
+        "gross_profit",
+        "gross_loss",
+    ]
+    lines.append(display.loc[:, columns].to_string(index=False))
     return "\n".join(lines)
 
 
@@ -80,6 +146,14 @@ def _trade_log_table(trade_log: pd.DataFrame) -> str:
         "exit_reason",
     ]
     return display.loc[:, columns].to_string(index=False)
+
+
+def _reason_lines(title: str, reasons: object) -> list[str]:
+    if not reasons:
+        return []
+    lines = ["", title, "-" * len(title)]
+    lines.extend(f"- {reason}" for reason in reasons)
+    return lines
 
 
 def _money(value: object) -> str:

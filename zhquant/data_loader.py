@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
@@ -33,28 +35,29 @@ def download_yfinance_ohlcv(
         import yfinance as yf
     except ImportError as exc:
         raise DataLoadError("yfinance is not installed. Run: pip install yfinance") from exc
+    cache_dir = Path(os.getenv("ZHQUANT_YFINANCE_CACHE", ".yfinance_cache"))
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    yf.set_tz_cache_location(str(cache_dir))
 
-    kwargs: dict[str, object] = {
-        "tickers": normalized_symbols,
+    base_kwargs: dict[str, object] = {
         "interval": interval,
         "group_by": "ticker",
         "auto_adjust": False,
         "progress": False,
-        "threads": True,
+        "threads": False,
     }
     if start or end:
-        kwargs["start"] = start
-        kwargs["end"] = end
+        base_kwargs["start"] = start
+        base_kwargs["end"] = end
     else:
-        kwargs["period"] = period or "1mo"
-
-    raw = yf.download(**kwargs)
-    if raw.empty:
-        raise DataLoadError(f"No data returned by yfinance for {', '.join(normalized_symbols)}")
+        base_kwargs["period"] = period or "1mo"
 
     market_data: dict[str, pd.DataFrame] = {}
     for symbol in normalized_symbols:
-        frame = _extract_symbol_frame(raw, symbol, len(normalized_symbols) == 1)
+        raw = yf.download(tickers=symbol, **base_kwargs)
+        if raw.empty:
+            raise DataLoadError(f"No data returned by yfinance for {symbol}")
+        frame = _extract_symbol_frame(raw, symbol, single_symbol=True)
         frame = _normalize_ohlcv(frame)
         if frame.empty:
             raise DataLoadError(f"No usable OHLCV rows for {symbol}")
@@ -93,4 +96,3 @@ def _normalize_ohlcv(frame: pd.DataFrame) -> pd.DataFrame:
     result = result.apply(pd.to_numeric, errors="coerce")
     result = result.dropna(subset=list(REQUIRED_COLUMNS))
     return result
-

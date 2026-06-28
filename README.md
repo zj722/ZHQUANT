@@ -96,6 +96,12 @@ With explicit dates:
 python -m zhquant.backtest_cli strategies/basic_momentum.json NVDA --start 2024-01-01 --end 2024-06-01 --initial-cash 100000
 ```
 
+Batch mode:
+
+```powershell
+python -m zhquant.backtest_cli strategies/simple_sma_pullback.json --tickers AAPL,MSFT,NVDA,MU,AMD --start 2024-01-01 --end 2024-06-01
+```
+
 The CLI overrides the strategy universe with the ticker you pass in, while still downloading referenced benchmark symbols such as `QQQ`.
 
 The result contains:
@@ -106,3 +112,18 @@ trade_log
 metrics
 compiled
 ```
+
+## Current Report Fields
+
+Single ticker reports include:
+
+- Strategy return, net P/L, Sharpe, Sortino, Calmar, max drawdown
+- Buy-and-hold benchmark return and max drawdown
+- Excess return versus buy and hold
+- Exposure time
+- Gross profit, gross loss, total commission
+- Trade count, win rate, profit factor, average holding days
+- Median trade return, best/worst trade, max consecutive losses
+- PASS/FAIL verdict and score
+
+Batch reports summarize those fields across tickers.
