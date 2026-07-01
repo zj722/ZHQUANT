@@ -1,0 +1,432 @@
+{
+  "name": "trend_pullback_overextension_v4",
+  "description": "Trend pullback strategy. Buy only healthy pullbacks inside an improving trend when the stock is not overextended. Full exits trigger on MA200 breaks or repeated MA50 breaks. Overextended reversal trims use partial exits.",
+  "timeframe": "1d",
+  "universe": {
+    "type": "static_list",
+    "symbols": ["NVDA", "AVGO", "AMD", "TSM", "MU"]
+  },
+  "entry": {
+    "all": [
+      {
+        "op": ">",
+        "left": { "indicator": "close" },
+        "right": { "indicator": "sma", "source": "close", "window": 50 }
+      },
+      {
+        "op": ">",
+        "left": { "indicator": "close" },
+        "right": { "indicator": "sma", "source": "close", "window": 200 }
+      },
+      {
+        "op": ">",
+        "left": { "indicator": "sma", "source": "close", "window": 50 },
+        "right": { "indicator": "sma", "source": "close", "window": 50, "shift": 20 }
+      },
+      {
+        "any": [
+          {
+            "op": ">",
+            "left": { "indicator": "return", "source": "close", "window": 63 },
+            "right": { "indicator": "return", "source": "close", "symbol": "QQQ", "window": 63 }
+          },
+          {
+            "op": ">",
+            "left": { "indicator": "return", "source": "close", "window": 20 },
+            "right": { "indicator": "return", "source": "close", "symbol": "QQQ", "window": 20 }
+          }
+        ]
+      },
+      {
+        "op": ">=",
+        "left": {
+          "op": "-",
+          "left": {
+            "op": "/",
+            "left": { "indicator": "close" },
+            "right": { "indicator": "rolling_max", "source": "close", "window": 20 }
+          },
+          "right": 1
+        },
+        "right": -0.12
+      },
+      {
+        "op": "<=",
+        "left": {
+          "op": "-",
+          "left": {
+            "op": "/",
+            "left": { "indicator": "close" },
+            "right": { "indicator": "rolling_max", "source": "close", "window": 20 }
+          },
+          "right": 1
+        },
+        "right": -0.02
+      },
+      {
+        "op": "<",
+        "left": { "indicator": "sma", "source": "volume", "window": 5 },
+        "right": { "indicator": "sma", "source": "volume", "window": 20 }
+      },
+      {
+        "op": ">",
+        "left": { "indicator": "close" },
+        "right": { "indicator": "sma", "source": "close", "window": 50 }
+      },
+      {
+        "op": ">=",
+        "left": { "indicator": "rsi", "source": "close", "window": 14 },
+        "right": 35
+      },
+      {
+        "op": "<=",
+        "left": { "indicator": "rsi", "source": "close", "window": 14 },
+        "right": 65
+      },
+      {
+        "op": ">",
+        "left": { "indicator": "close" },
+        "right": { "indicator": "rolling_max", "source": "high", "window": 3, "shift": 1 }
+      },
+      {
+        "not": {
+          "any": [
+            {
+              "op": ">",
+              "left": { "indicator": "close" },
+              "right": {
+                "op": "*",
+                "left": { "indicator": "ema", "source": "close", "window": 20 },
+                "right": 1.12
+              }
+            },
+            {
+              "op": ">",
+              "left": { "indicator": "rsi", "source": "close", "window": 14 },
+              "right": 72
+            },
+            {
+              "op": ">",
+              "left": { "indicator": "return", "source": "close", "window": 5 },
+              "right": 0.15
+            },
+            {
+              "op": ">",
+              "left": { "indicator": "close" },
+              "right": {
+                "op": "*",
+                "left": { "indicator": "sma", "source": "close", "window": 50 },
+                "right": 1.25
+              }
+            },
+            {
+              "op": ">",
+              "left": { "indicator": "close" },
+              "right": {
+                "op": "+",
+                "left": { "indicator": "sma", "source": "close", "window": 50 },
+                "right": {
+                  "op": "*",
+                  "left": { "indicator": "atr", "window": 20 },
+                  "right": 4
+                }
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "exit": {
+    "any": [
+      {
+        "op": "<",
+        "left": { "indicator": "close" },
+        "right": { "indicator": "sma", "source": "close", "window": 200 }
+      },
+      {
+        "all": [
+          {
+            "op": "<",
+            "left": { "indicator": "close" },
+            "right": { "indicator": "sma", "source": "close", "window": 50 }
+          },
+          {
+            "op": "<",
+            "left": { "indicator": "close", "shift": 1 },
+            "right": { "indicator": "sma", "source": "close", "window": 50, "shift": 1 }
+          }
+        ]
+      }
+    ]
+  },
+  "reduce_exit": {
+    "all": [
+      {
+        "op": ">",
+        "left": { "indicator": "return", "source": "close", "window": 5 },
+        "right": { "indicator": "rolling_quantile", "source": "close", "return_window": 5, "window": 252, "quantile": 0.9, "shift": 1 }
+      },
+      {
+        "op": ">",
+        "left": { "indicator": "volume" },
+        "right": {
+          "op": "*",
+          "left": { "indicator": "sma", "source": "volume", "window": 20 },
+          "right": 1.5
+        }
+      },
+      {
+        "op": "<",
+        "left": {
+          "op": "/",
+          "left": {
+            "op": "-",
+            "left": { "indicator": "close" },
+            "right": { "indicator": "low" }
+          },
+          "right": {
+            "op": "-",
+            "left": { "indicator": "high" },
+            "right": { "indicator": "low" }
+          }
+        },
+        "right": 0.4
+      }
+    ]
+  },
+  "trim_exit": {
+    "all": [
+      {
+        "op": ">",
+        "left": { "indicator": "return", "source": "close", "window": 5 },
+        "right": { "indicator": "rolling_quantile", "source": "close", "return_window": 5, "window": 252, "quantile": 0.9, "shift": 1 }
+      },
+      {
+        "not": {
+          "all": [
+            {
+              "op": ">",
+              "left": { "indicator": "volume" },
+              "right": {
+                "op": "*",
+                "left": { "indicator": "sma", "source": "volume", "window": 20 },
+                "right": 1.5
+              }
+            },
+            {
+              "op": "<",
+              "left": {
+                "op": "/",
+                "left": {
+                  "op": "-",
+                  "left": { "indicator": "close" },
+                  "right": { "indicator": "low" }
+                },
+                "right": {
+                  "op": "-",
+                  "left": { "indicator": "high" },
+                  "right": { "indicator": "low" }
+                }
+              },
+              "right": 0.4
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "diagnostics": {
+    "trend_ok": {
+      "all": [
+        {
+          "op": ">",
+          "left": { "indicator": "close" },
+          "right": { "indicator": "sma", "source": "close", "window": 50 }
+        },
+        {
+          "op": ">",
+          "left": { "indicator": "close" },
+          "right": { "indicator": "sma", "source": "close", "window": 200 }
+        },
+        {
+          "op": ">",
+          "left": { "indicator": "sma", "source": "close", "window": 50 },
+          "right": { "indicator": "sma", "source": "close", "window": 50, "shift": 20 }
+        },
+        {
+          "any": [
+            {
+              "op": ">",
+              "left": { "indicator": "return", "source": "close", "window": 63 },
+              "right": { "indicator": "return", "source": "close", "symbol": "QQQ", "window": 63 }
+            },
+            {
+              "op": ">",
+              "left": { "indicator": "return", "source": "close", "window": 20 },
+              "right": { "indicator": "return", "source": "close", "symbol": "QQQ", "window": 20 }
+            }
+          ]
+        }
+      ]
+    },
+    "healthy_pullback": {
+      "all": [
+        {
+          "op": ">=",
+          "left": {
+            "op": "-",
+            "left": {
+              "op": "/",
+              "left": { "indicator": "close" },
+              "right": { "indicator": "rolling_max", "source": "close", "window": 20 }
+            },
+            "right": 1
+          },
+          "right": -0.12
+        },
+        {
+          "op": "<=",
+          "left": {
+            "op": "-",
+            "left": {
+              "op": "/",
+              "left": { "indicator": "close" },
+              "right": { "indicator": "rolling_max", "source": "close", "window": 20 }
+            },
+            "right": 1
+          },
+          "right": -0.02
+        },
+        {
+          "op": "<",
+          "left": { "indicator": "sma", "source": "volume", "window": 5 },
+          "right": { "indicator": "sma", "source": "volume", "window": 20 }
+        },
+        {
+          "op": ">",
+          "left": { "indicator": "close" },
+          "right": { "indicator": "sma", "source": "close", "window": 50 }
+        },
+        {
+          "op": ">=",
+          "left": { "indicator": "rsi", "source": "close", "window": 14 },
+          "right": 35
+        },
+        {
+          "op": "<=",
+          "left": { "indicator": "rsi", "source": "close", "window": 14 },
+          "right": 65
+        }
+      ]
+    },
+    "buy_trigger": {
+      "op": ">",
+      "left": { "indicator": "close" },
+      "right": { "indicator": "rolling_max", "source": "high", "window": 3, "shift": 1 }
+    },
+    "do_not_buy": {
+      "any": [
+        {
+          "op": ">",
+          "left": { "indicator": "close" },
+          "right": {
+            "op": "*",
+            "left": { "indicator": "ema", "source": "close", "window": 20 },
+            "right": 1.12
+          }
+        },
+        {
+          "op": ">",
+          "left": { "indicator": "rsi", "source": "close", "window": 14 },
+          "right": 72
+        },
+        {
+          "op": ">",
+          "left": { "indicator": "return", "source": "close", "window": 5 },
+          "right": 0.15
+        },
+        {
+          "op": ">",
+          "left": { "indicator": "close" },
+          "right": {
+            "op": "*",
+            "left": { "indicator": "sma", "source": "close", "window": 50 },
+            "right": 1.25
+          }
+        },
+        {
+          "op": ">",
+          "left": { "indicator": "close" },
+          "right": {
+            "op": "+",
+            "left": { "indicator": "sma", "source": "close", "window": 50 },
+            "right": {
+              "op": "*",
+              "left": { "indicator": "atr", "window": 20 },
+              "right": 4
+            }
+          }
+        }
+      ]
+    },
+    "short_term_extended": {
+      "op": ">",
+      "left": {
+        "op": "-",
+        "left": { "indicator": "close" },
+        "right": { "indicator": "close", "shift": 5 }
+      },
+      "right": {
+        "op": "*",
+        "left": { "indicator": "atr", "window": 20 },
+        "right": 3
+      }
+    },
+    "overextended": {
+      "op": ">",
+      "left": { "indicator": "return", "source": "close", "window": 5 },
+      "right": { "indicator": "rolling_quantile", "source": "close", "return_window": 5, "window": 252, "quantile": 0.9, "shift": 1 }
+    },
+    "reversal_signal": {
+      "all": [
+        {
+          "op": ">",
+          "left": { "indicator": "volume" },
+          "right": {
+            "op": "*",
+            "left": { "indicator": "sma", "source": "volume", "window": 20 },
+            "right": 1.5
+          }
+        },
+        {
+          "op": "<",
+          "left": {
+            "op": "/",
+            "left": {
+              "op": "-",
+              "left": { "indicator": "close" },
+              "right": { "indicator": "low" }
+            },
+            "right": {
+              "op": "-",
+              "left": { "indicator": "high" },
+              "right": { "indicator": "low" }
+            }
+          },
+          "right": 0.4
+        }
+      ]
+    }
+  },
+  "risk": {
+    "max_position_pct": 0.25,
+    "max_positions": 1,
+    "execution": "next_open",
+    "slippage_bps": 5,
+    "commission_bps": 1,
+    "stop_loss_pct": -0.1,
+    "reduce_position_pct": 0.6,
+    "trim_position_pct": 0.25
+  }
+}

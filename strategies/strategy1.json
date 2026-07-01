@@ -1,0 +1,56 @@
+{
+    "name": "multi_asset_trend_momentum_pullback",
+    "description": "Buy liquid large-cap stocks in confirmed uptrends after moderate pullbacks, then exit on trend weakness, overextension, or downside momentum.",
+    "timeframe": "1d",
+    "universe": {
+      "type": "static_list",
+      "symbols": ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "AVGO", "JPM", "LLY", "XOM"]
+    },
+    "entry": {
+      "all": [
+        {
+          "op": ">",
+          "left": { "indicator": "ema", "source": "close", "window": 20 },
+          "right": { "indicator": "ema", "source": "close", "window": 50 }
+        },
+        {
+          "op": "<",
+          "left": { "indicator": "rsi", "source": "close", "window": 14 },
+          "right": 60
+        },
+        {
+          "op": ">",
+          "left": { "indicator": "return", "source": "close", "window": 60 },
+          "right": 0
+        }
+      ]
+    },
+    "exit": {
+      "any": [
+        {
+          "op": "<",
+          "left": { "indicator": "ema", "source": "close", "window": 20 },
+          "right": { "indicator": "ema", "source": "close", "window": 50 }
+        },
+        {
+          "op": ">",
+          "left": { "indicator": "rsi", "source": "close", "window": 14 },
+          "right": 75
+        },
+        {
+          "op": "<",
+          "left": { "indicator": "return", "source": "close", "window": 10 },
+          "right": -0.05
+        }
+      ]
+    },
+    "risk": {
+      "max_position_pct": 0.2,
+      "max_positions": 5,
+      "execution": "next_open",
+      "slippage_bps": 5,
+      "commission_bps": 1,
+      "stop_loss_pct": -0.06,
+      "take_profit_pct": 0.12
+    }
+  }

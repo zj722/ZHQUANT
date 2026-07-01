@@ -26,6 +26,10 @@ class CompiledSignals:
     exit: pd.DataFrame
     stateful_exit_rules: tuple[StatefulRule, ...]
     data_dependencies: tuple[str, ...]
+    diagnostics: dict[str, pd.DataFrame]
+    add_entry: pd.DataFrame | None = None
+    reduce_exit: pd.DataFrame | None = None
+    trim_exit: pd.DataFrame | None = None
 
 
 class StrategyCompiler:
@@ -64,7 +68,21 @@ class StrategyCompiler:
         self.data_dependencies = set()
 
         entry = self._eval_condition(strategy["entry"], "$.entry", context="entry")
+        add_entry = None
+        if "add_entry" in strategy:
+            add_entry = self._eval_condition(strategy["add_entry"], "$.add_entry", context="entry")
         exit_signal = self._eval_condition(strategy["exit"], "$.exit", context="exit")
+        reduce_exit = None
+        if "reduce_exit" in strategy:
+            reduce_exit = self._eval_condition(strategy["reduce_exit"], "$.reduce_exit", context="exit")
+        trim_exit = None
+        if "trim_exit" in strategy:
+            trim_exit = self._eval_condition(strategy["trim_exit"], "$.trim_exit", context="exit")
+        diagnostics = {
+            name: self._eval_condition(condition, f"$.diagnostics.{name}", context="entry").fillna(False).astype(bool)
+            for name, condition in strategy.get("diagnostics", {}).items()
+        }
+        diagnostics.setdefault("final_buy_signal", entry.fillna(False).astype(bool))
 
         return CompiledSignals(
             strategy_name=strategy["name"],
@@ -72,6 +90,10 @@ class StrategyCompiler:
             exit=exit_signal.fillna(False).astype(bool),
             stateful_exit_rules=tuple(self.stateful_exit_rules),
             data_dependencies=tuple(sorted(self.data_dependencies)),
+            diagnostics=diagnostics,
+            add_entry=add_entry.fillna(False).astype(bool) if add_entry is not None else None,
+            reduce_exit=reduce_exit.fillna(False).astype(bool) if reduce_exit is not None else None,
+            trim_exit=trim_exit.fillna(False).astype(bool) if trim_exit is not None else None,
         )
 
     def _prepare_market_data(self) -> None:
@@ -154,45 +176,61 @@ class StrategyCompiler:
             return self._source_matrix(value)
 
         if "indicator" in value:
-            return self._indicator(value, path)
+            return self._indicator(value, path, context)
 
         if "field" in value:
             raise CompilerError(f"{path}: field operands require the backtester state engine")
 
         return self._math(value, path, context)
 
-    def _indicator(self, spec: dict[str, Any], path: str) -> pd.DataFrame:
+    def _indicator(self, spec: dict[str, Any], path: str, context: str) -> pd.DataFrame:
         indicator = spec["indicator"]
         symbol = spec.get("symbol")
+        shift = int(spec.get("shift", 0))
 
         if indicator in BASE_SERIES:
-            return self._source_matrix(indicator, symbol=symbol)
+            return self._apply_shift(self._source_matrix(indicator, symbol=symbol), shift)
+
+        if indicator == "rolling_count":
+            condition = self._eval_condition(spec["condition"], f"{path}.condition", context=context)
+            result = condition.astype(int).rolling(int(spec["window"]), min_periods=int(spec["window"])).sum()
+            return self._apply_shift(result, shift)
+
+        if indicator == "rolling_quantile":
+            source_name = spec.get("source", "close")
+            source = self._source_matrix(source_name, symbol=symbol)
+            return_window = int(spec["return_window"])
+            window = int(spec["window"])
+            quantile = float(spec["quantile"])
+            series = source.pct_change(return_window)
+            result = series.rolling(window, min_periods=window).quantile(quantile)
+            return self._apply_shift(result, shift)
 
         source_name = spec.get("source", "close")
         source = self._source_matrix(source_name, symbol=symbol)
         window = int(spec["window"])
 
         if indicator == "sma":
-            return source.rolling(window, min_periods=window).mean()
+            return self._apply_shift(source.rolling(window, min_periods=window).mean(), shift)
         if indicator == "ema":
-            return source.ewm(span=window, min_periods=window, adjust=False).mean()
+            return self._apply_shift(source.ewm(span=window, min_periods=window, adjust=False).mean(), shift)
         if indicator == "return":
-            return source.pct_change(window)
+            return self._apply_shift(source.pct_change(window), shift)
         if indicator == "rolling_max":
-            return source.rolling(window, min_periods=window).max()
+            return self._apply_shift(source.rolling(window, min_periods=window).max(), shift)
         if indicator == "rolling_min":
-            return source.rolling(window, min_periods=window).min()
+            return self._apply_shift(source.rolling(window, min_periods=window).min(), shift)
         if indicator == "zscore":
             rolling = source.rolling(window, min_periods=window)
-            return (source - rolling.mean()) / rolling.std(ddof=0).replace(0, np.nan)
+            return self._apply_shift((source - rolling.mean()) / rolling.std(ddof=0).replace(0, np.nan), shift)
         if indicator == "rsi":
             delta = source.diff()
             gains = delta.clip(lower=0).rolling(window, min_periods=window).mean()
             losses = (-delta.clip(upper=0)).rolling(window, min_periods=window).mean()
             rs = gains / losses.replace(0, np.nan)
-            return 100 - (100 / (1 + rs))
+            return self._apply_shift(100 - (100 / (1 + rs)), shift)
         if indicator == "atr":
-            return self._atr_matrix(window, symbol=symbol)
+            return self._apply_shift(self._atr_matrix(window, symbol=symbol), shift)
 
         raise CompilerError(f"{path}.indicator: unsupported indicator {indicator}")
 
@@ -340,6 +378,11 @@ class StrategyCompiler:
             return pd.DataFrame(func(left, right), index=self.index, columns=self.symbols)
         return float(func(left, right))
 
+    def _apply_shift(self, frame: pd.DataFrame, periods: int) -> pd.DataFrame:
+        if periods == 0:
+            return frame
+        return frame.shift(periods)
+
     def _contains_stateful_field(self, node: Any) -> bool:
         if isinstance(node, dict):
             if "field" in node:
@@ -356,4 +399,3 @@ def compile_strategy(
     events: dict[str, Any] | None = None,
 ) -> CompiledSignals:
     return StrategyCompiler(market_data=market_data, events=events).compile(strategy)
-

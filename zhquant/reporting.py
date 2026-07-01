@@ -25,6 +25,10 @@ def format_backtest_report(
         f"Ticker: {ticker.upper()}",
         f"Period: {period_label}",
         "",
+        "Current Action",
+        "-" * 14,
+        _current_action_table(result.current_actions),
+        "",
         "Summary",
         "-" * 7,
         f"Initial Cash: {_money(metrics.get('initial_cash'))}",
@@ -108,6 +112,8 @@ def format_batch_report(rows: list[dict[str, object]], strategy_path: str | Path
 
     columns = [
         "ticker",
+        "current_action",
+        "current_reason",
         "verdict",
         "score",
         "strategy_return",
@@ -123,6 +129,29 @@ def format_batch_report(rows: list[dict[str, object]], strategy_path: str | Path
         "gross_loss",
     ]
     lines.append(display.loc[:, columns].to_string(index=False))
+    return "\n".join(lines)
+
+
+def format_diagnostic_report(result: BacktestResult) -> str:
+    lines = [
+        "Daily Signal Diagnostics",
+        "=" * 24,
+    ]
+    if result.diagnostic_log.empty:
+        lines.append("No diagnostics defined for this strategy.")
+        return "\n".join(lines)
+
+    lines.extend(["", "Pass Rates", "-" * 10])
+    for name, rate in result.diagnostic_pass_rates.items():
+        lines.append(f"{name}: {rate:.2%}")
+
+    lines.extend(["", "Daily Conditions", "-" * 16])
+    display = result.diagnostic_log.copy()
+    display["signal_date"] = pd.to_datetime(display["signal_date"]).dt.strftime("%Y-%m-%d")
+    for column in display.columns:
+        if column not in {"symbol", "signal_date"}:
+            display[column] = display[column].map(lambda value: "Y" if value else ".")
+    lines.append(display.to_string(index=False))
     return "\n".join(lines)
 
 
@@ -195,6 +224,24 @@ def _trade_log_table(trade_log: pd.DataFrame) -> str:
         "net_return",
         "holding_days",
         "exit_reason",
+    ]
+    return display.loc[:, columns].to_string(index=False)
+
+
+def _current_action_table(current_actions: pd.DataFrame) -> str:
+    if current_actions.empty:
+        return "N/A"
+
+    display = current_actions.copy()
+    display["signal_date"] = pd.to_datetime(display["signal_date"]).dt.strftime("%Y-%m-%d")
+    display["in_position"] = display["in_position"].map(lambda value: "yes" if value else "no")
+    columns = [
+        "symbol",
+        "signal_date",
+        "action",
+        "reason",
+        "in_position",
+        "execution",
     ]
     return display.loc[:, columns].to_string(index=False)
 

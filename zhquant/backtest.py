@@ -21,15 +21,20 @@ class Position:
     shares: float
     entry_commission: float
     signal_date: pd.Timestamp
+    add_count: int = 0
 
 
 @dataclass(frozen=True)
 class BacktestResult:
     strategy_name: str
     equity_curve: pd.DataFrame
+    order_log: pd.DataFrame
     trade_log: pd.DataFrame
     metrics: dict[str, Any]
     compiled: CompiledSignals
+    current_actions: pd.DataFrame
+    diagnostic_log: pd.DataFrame
+    diagnostic_pass_rates: dict[str, float]
     benchmark_metrics: dict[str, Any] | None = None
     score: dict[str, Any] | None = None
 
@@ -72,21 +77,33 @@ class LongOnlyBacktester:
         self.commission_rate = float(self.risk["commission_bps"]) / 10_000.0
         self.stop_loss_pct = self.risk.get("stop_loss_pct")
         self.take_profit_pct = self.risk.get("take_profit_pct")
+        self.max_additions = int(self.risk.get("max_additions", 0))
+        self.add_position_pct = float(self.risk.get("add_position_pct", 0.0))
+        self.reduce_position_pct = float(self.risk.get("reduce_position_pct", 0.0))
+        self.trim_position_pct = float(self.risk.get("trim_position_pct", 0.0))
 
         self.open_prices = self._price_matrix("open")
         self.close_prices = self._price_matrix("close")
 
         self.cash = self.initial_cash
         self.positions: dict[str, Position] = {}
+        self.order_rows: list[dict[str, Any]] = []
         self.trade_rows: list[dict[str, Any]] = []
         self.equity_rows: list[dict[str, Any]] = []
+        self.current_actions = pd.DataFrame()
+        self.diagnostic_log = self._diagnostic_log()
+        self.diagnostic_pass_rates = self._diagnostic_pass_rates(self.diagnostic_log)
 
     def run(self) -> BacktestResult:
         pending_entries: list[str] = []
+        pending_additions: list[str] = []
         pending_exits: dict[str, str] = {}
+        pending_partial_exits: dict[str, tuple[str, float]] = {}
 
         for idx, date in enumerate(self.index):
             self._execute_exits(date, pending_exits)
+            self._execute_partial_exits(date, pending_partial_exits)
+            self._execute_additions(date, pending_additions)
             self._execute_entries(date, pending_entries)
 
             equity = self._portfolio_value(date, price_type="close")
@@ -100,11 +117,16 @@ class LongOnlyBacktester:
             )
 
             if idx == len(self.index) - 1:
+                self.current_actions = self._current_actions(date)
                 pending_entries = []
+                pending_additions = []
                 pending_exits = {}
+                pending_partial_exits = {}
                 continue
 
             pending_exits = self._collect_exit_orders(date)
+            pending_partial_exits = self._collect_partial_exit_orders(date, pending_exits)
+            pending_additions = self._collect_add_orders(date, pending_exits)
             pending_entries = self._collect_entry_orders(date)
 
         if self.force_close and self.positions:
@@ -121,6 +143,7 @@ class LongOnlyBacktester:
             )
 
         equity_curve = pd.DataFrame(self.equity_rows).drop_duplicates("date", keep="last").set_index("date")
+        order_log = pd.DataFrame(self.order_rows)
         trade_log = pd.DataFrame(self.trade_rows)
         metrics = self._metrics(equity_curve, trade_log)
         benchmark_metrics = self._benchmark_metrics() if len(self.symbols) == 1 else None
@@ -129,12 +152,91 @@ class LongOnlyBacktester:
         return BacktestResult(
             strategy_name=self.strategy["name"],
             equity_curve=equity_curve,
+            order_log=order_log,
             trade_log=trade_log,
             metrics=metrics,
             compiled=self.compiled,
+            current_actions=self.current_actions,
+            diagnostic_log=self.diagnostic_log,
+            diagnostic_pass_rates=self.diagnostic_pass_rates,
             benchmark_metrics=benchmark_metrics,
             score=score,
         )
+
+    def _current_actions(self, signal_date: pd.Timestamp) -> pd.DataFrame:
+        exit_orders = self._collect_exit_orders(signal_date)
+        partial_exit_orders = self._collect_partial_exit_orders(signal_date, exit_orders)
+        entry_signals = self._collect_entry_orders(signal_date)
+        add_signals = self._collect_add_orders(signal_date, exit_orders)
+        available_slots = max(self.max_positions - len(self.positions), 0)
+        actionable_entries = set(entry_signals[:available_slots])
+        blocked_entries = set(entry_signals[available_slots:])
+
+        rows: list[dict[str, Any]] = []
+        for symbol in self.symbols:
+            in_position = symbol in self.positions
+            entry_signal = bool(self.compiled.entry.loc[signal_date, symbol])
+            exit_signal = symbol in exit_orders
+
+            action = "HOLD"
+            reason = "in_position" if in_position else "no_signal"
+            if exit_signal:
+                action = "SELL"
+                reason = exit_orders[symbol]
+            elif symbol in partial_exit_orders:
+                action = "REDUCE" if partial_exit_orders[symbol][1] >= 0.5 else "TRIM"
+                reason = partial_exit_orders[symbol][0]
+            elif symbol in add_signals:
+                action = "ADD"
+                reason = "add_entry_signal"
+            elif symbol in actionable_entries:
+                action = "BUY"
+                reason = "entry_signal"
+            elif symbol in blocked_entries:
+                reason = "max_positions_reached"
+
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "signal_date": signal_date,
+                    "action": action,
+                    "reason": reason,
+                    "in_position": in_position,
+                    "entry_signal": entry_signal,
+                    "add_entry_signal": symbol in add_signals,
+                    "exit_signal": exit_signal,
+                    "execution": "next_open",
+                }
+            )
+
+        return pd.DataFrame(rows)
+
+    def _diagnostic_log(self) -> pd.DataFrame:
+        if not self.compiled.diagnostics:
+            return pd.DataFrame()
+
+        rows: list[dict[str, Any]] = []
+        for date in self.index:
+            for symbol in self.symbols:
+                row: dict[str, Any] = {
+                    "symbol": symbol,
+                    "signal_date": date,
+                }
+                for name, frame in self.compiled.diagnostics.items():
+                    row[name] = bool(frame.loc[date, symbol])
+                rows.append(row)
+
+        return pd.DataFrame(rows)
+
+    def _diagnostic_pass_rates(self, diagnostic_log: pd.DataFrame) -> dict[str, float]:
+        if diagnostic_log.empty:
+            return {}
+        ignored = {"symbol", "signal_date"}
+        return {
+            column: float(diagnostic_log[column].mean())
+            for column in diagnostic_log.columns
+            if column not in ignored
+        }
 
     def _collect_exit_orders(self, signal_date: pd.Timestamp) -> dict[str, str]:
         exits: dict[str, str] = {}
@@ -170,10 +272,49 @@ class LongOnlyBacktester:
                 orders.append(symbol)
         return orders
 
+    def _collect_add_orders(self, signal_date: pd.Timestamp, pending_exits: dict[str, str]) -> list[str]:
+        if self.compiled.add_entry is None or self.max_additions <= 0 or self.add_position_pct <= 0:
+            return []
+
+        orders: list[str] = []
+        for symbol, position in self.positions.items():
+            if symbol in pending_exits:
+                continue
+            if position.add_count >= self.max_additions:
+                continue
+            if bool(self.compiled.add_entry.loc[signal_date, symbol]):
+                orders.append(symbol)
+        return orders
+
+    def _collect_partial_exit_orders(self, signal_date: pd.Timestamp, pending_exits: dict[str, str]) -> dict[str, tuple[str, float]]:
+        orders: dict[str, tuple[str, float]] = {}
+        for symbol in self.positions:
+            if symbol in pending_exits:
+                continue
+            if (
+                self.compiled.reduce_exit is not None
+                and self.reduce_position_pct > 0
+                and bool(self.compiled.reduce_exit.loc[signal_date, symbol])
+            ):
+                orders[symbol] = ("reduce_exit", self.reduce_position_pct)
+                continue
+            if (
+                self.compiled.trim_exit is not None
+                and self.trim_position_pct > 0
+                and bool(self.compiled.trim_exit.loc[signal_date, symbol])
+            ):
+                orders[symbol] = ("trim_exit", self.trim_position_pct)
+        return orders
+
     def _execute_exits(self, date: pd.Timestamp, exits: dict[str, str]) -> None:
         for symbol, reason in list(exits.items()):
             if symbol in self.positions:
                 self._close_position(symbol, date, price_type="open", reason=reason)
+
+    def _execute_partial_exits(self, date: pd.Timestamp, partial_exits: dict[str, tuple[str, float]]) -> None:
+        for symbol, (reason, pct) in list(partial_exits.items()):
+            if symbol in self.positions:
+                self._partial_close_position(symbol, date, pct=pct, reason=reason)
 
     def _execute_entries(self, date: pd.Timestamp, entries: list[str]) -> None:
         for symbol in entries:
@@ -182,33 +323,74 @@ class LongOnlyBacktester:
             if len(self.positions) >= self.max_positions:
                 break
 
-            equity = self._portfolio_value(date, price_type="open")
-            target_notional = equity * self.max_position_pct
-            max_affordable = self.cash / (1.0 + self.commission_rate)
-            notional = min(target_notional, max_affordable)
-            if notional <= 0:
-                continue
+            self._buy_position(symbol, date, self.max_position_pct, is_addition=False)
 
-            raw_open = self._price(symbol, date, "open")
-            if raw_open <= 0 or np.isnan(raw_open):
+    def _execute_additions(self, date: pd.Timestamp, additions: list[str]) -> None:
+        for symbol in additions:
+            if symbol not in self.positions:
                 continue
+            self._buy_position(symbol, date, self.add_position_pct, is_addition=True)
 
-            fill_price = raw_open * (1.0 + self.slippage_rate)
-            shares = notional / fill_price
-            commission = notional * self.commission_rate
-            total_cost = notional + commission
-            if total_cost > self.cash + 1e-9:
-                continue
+    def _buy_position(self, symbol: str, date: pd.Timestamp, position_pct: float, is_addition: bool) -> None:
+        equity = self._portfolio_value(date, price_type="open")
+        target_notional = equity * position_pct
+        max_affordable = self.cash / (1.0 + self.commission_rate)
+        notional = min(target_notional, max_affordable)
+        if notional <= 0:
+            return
 
-            self.cash -= total_cost
-            self.positions[symbol] = Position(
+        raw_open = self._price(symbol, date, "open")
+        if raw_open <= 0 or np.isnan(raw_open):
+            return
+
+        fill_price = raw_open * (1.0 + self.slippage_rate)
+        shares = notional / fill_price
+        commission = notional * self.commission_rate
+        total_cost = notional + commission
+        if total_cost > self.cash + 1e-9:
+            return
+
+        self.cash -= total_cost
+
+        if is_addition:
+            position = self.positions[symbol]
+            old_notional = position.shares * position.entry_price
+            new_notional = shares * fill_price
+            total_shares = position.shares + shares
+            position.entry_price = (old_notional + new_notional) / total_shares
+            position.shares = total_shares
+            position.entry_commission += commission
+            position.add_count += 1
+            self._record_order(
                 symbol=symbol,
-                entry_date=date,
-                entry_price=fill_price,
+                date=date,
+                action="ADD",
+                price=fill_price,
                 shares=shares,
-                entry_commission=commission,
-                signal_date=date,
+                notional=notional,
+                commission=commission,
+                reason="add_entry_signal",
             )
+            return
+
+        self.positions[symbol] = Position(
+            symbol=symbol,
+            entry_date=date,
+            entry_price=fill_price,
+            shares=shares,
+            entry_commission=commission,
+            signal_date=date,
+        )
+        self._record_order(
+            symbol=symbol,
+            date=date,
+            action="BUY",
+            price=fill_price,
+            shares=shares,
+            notional=notional,
+            commission=commission,
+            reason="entry_signal",
+        )
 
     def _close_position(self, symbol: str, date: pd.Timestamp, price_type: str, reason: str) -> None:
         position = self.positions.pop(symbol)
@@ -221,6 +403,16 @@ class LongOnlyBacktester:
         exit_commission = gross_proceeds * self.commission_rate
         net_proceeds = gross_proceeds - exit_commission
         self.cash += net_proceeds
+        self._record_order(
+            symbol=symbol,
+            date=date,
+            action="SELL",
+            price=exit_price,
+            shares=position.shares,
+            notional=gross_proceeds,
+            commission=exit_commission,
+            reason=reason,
+        )
 
         entry_notional = position.shares * position.entry_price
         total_commission = position.entry_commission + exit_commission
@@ -244,7 +436,93 @@ class LongOnlyBacktester:
                 "exit_commission": exit_commission,
                 "total_commission": total_commission,
                 "holding_days": self._holding_days(position, date),
+                "add_count": position.add_count,
                 "exit_reason": reason,
+            }
+        )
+
+    def _partial_close_position(self, symbol: str, date: pd.Timestamp, pct: float, reason: str) -> None:
+        position = self.positions[symbol]
+        pct = max(0.0, min(float(pct), 1.0))
+        shares_to_sell = position.shares * pct
+        if shares_to_sell <= 0:
+            return
+        if shares_to_sell >= position.shares * 0.999:
+            self._close_position(symbol, date, price_type="open", reason=reason)
+            return
+
+        raw_price = self._price(symbol, date, "open")
+        if raw_price <= 0 or np.isnan(raw_price):
+            raise BacktestError(f"Cannot reduce {symbol} on {date}: invalid open price")
+
+        exit_price = raw_price * (1.0 - self.slippage_rate)
+        gross_proceeds = shares_to_sell * exit_price
+        exit_commission = gross_proceeds * self.commission_rate
+        net_proceeds = gross_proceeds - exit_commission
+        self.cash += net_proceeds
+
+        entry_notional = shares_to_sell * position.entry_price
+        allocated_entry_commission = position.entry_commission * (shares_to_sell / position.shares)
+        position.entry_commission -= allocated_entry_commission
+        total_commission = allocated_entry_commission + exit_commission
+        gross_pnl = gross_proceeds - entry_notional
+        net_pnl = gross_pnl - total_commission
+        net_return = net_pnl / entry_notional if entry_notional else 0.0
+        position.shares -= shares_to_sell
+
+        action = "REDUCE" if pct >= 0.5 else "TRIM"
+        self._record_order(
+            symbol=symbol,
+            date=date,
+            action=action,
+            price=exit_price,
+            shares=shares_to_sell,
+            notional=gross_proceeds,
+            commission=exit_commission,
+            reason=reason,
+        )
+        self.trade_rows.append(
+            {
+                "symbol": symbol,
+                "entry_date": position.entry_date,
+                "exit_date": date,
+                "entry_price": position.entry_price,
+                "exit_price": exit_price,
+                "shares": shares_to_sell,
+                "entry_notional": entry_notional,
+                "gross_pnl": gross_pnl,
+                "net_pnl": net_pnl,
+                "net_return": net_return,
+                "entry_commission": allocated_entry_commission,
+                "exit_commission": exit_commission,
+                "total_commission": total_commission,
+                "holding_days": self._holding_days(position, date),
+                "add_count": position.add_count,
+                "exit_reason": reason,
+            }
+        )
+
+    def _record_order(
+        self,
+        symbol: str,
+        date: pd.Timestamp,
+        action: str,
+        price: float,
+        shares: float,
+        notional: float,
+        commission: float,
+        reason: str,
+    ) -> None:
+        self.order_rows.append(
+            {
+                "symbol": symbol,
+                "date": date,
+                "action": action,
+                "price": price,
+                "shares": shares,
+                "notional": notional,
+                "commission": commission,
+                "reason": reason,
             }
         )
 
@@ -276,6 +554,10 @@ class LongOnlyBacktester:
     def _eval_stateful_operand(self, value: Any, path: str, symbol: str, date: pd.Timestamp) -> float:
         if isinstance(value, int | float):
             return float(value)
+        if isinstance(value, str):
+            return self._stateful_source_value(symbol, value, date)
+        if isinstance(value, dict) and "indicator" in value:
+            return self._stateful_indicator_value(value, path, symbol, date)
         if isinstance(value, dict) and "field" in value:
             position = self.positions[symbol]
             field = value["field"]
@@ -290,9 +572,61 @@ class LongOnlyBacktester:
             if field == "cash_pct":
                 equity = self._portfolio_value(date, price_type="close")
                 return self.cash / equity if equity else 0.0
+            if field == "entry_price":
+                return position.entry_price
+            if field == "highest_close_since_entry":
+                return self._highest_close_since_entry(position, date)
         if isinstance(value, dict) and "op" in value:
             return self._eval_stateful_math(value, path, symbol, date)
         raise BacktestError(f"{path}: unsupported stateful operand")
+
+    def _stateful_indicator_value(self, spec: dict[str, Any], path: str, symbol: str, date: pd.Timestamp) -> float:
+        indicator = spec["indicator"]
+        data_symbol = str(spec.get("symbol", symbol)).upper()
+        shift = int(spec.get("shift", 0))
+        eval_date = self._shifted_date(date, shift)
+
+        if indicator in {"open", "high", "low", "close", "volume"}:
+            return self._stateful_source_value(data_symbol, indicator, eval_date)
+
+        if indicator == "rolling_count":
+            window = int(spec["window"])
+            matching_dates = self.index[self.index <= eval_date]
+            if len(matching_dates) < window:
+                return float("nan")
+            return float(
+                sum(
+                    self._eval_stateful_condition(spec["condition"], f"{path}.condition", symbol, window_date)
+                    for window_date in matching_dates[-window:]
+                )
+            )
+
+        source_name = spec.get("source", "close")
+        source = self._stateful_source_series(data_symbol, source_name).loc[:eval_date]
+        window = int(spec["window"])
+        if len(source) < window:
+            return float("nan")
+
+        if indicator == "sma":
+            return float(source.tail(window).mean())
+        if indicator == "ema":
+            return float(source.ewm(span=window, min_periods=window, adjust=False).mean().iloc[-1])
+        if indicator == "return":
+            return float(source.pct_change(window).iloc[-1])
+        if indicator == "rolling_max":
+            return float(source.tail(window).max())
+        if indicator == "rolling_min":
+            return float(source.tail(window).min())
+        if indicator == "zscore":
+            sample = source.tail(window)
+            std = sample.std(ddof=0)
+            return float((sample.iloc[-1] - sample.mean()) / std) if std else float("nan")
+        if indicator == "rsi":
+            return self._stateful_rsi_value(source, window)
+        if indicator == "atr":
+            return self._stateful_atr_value(data_symbol, eval_date, window)
+
+        raise BacktestError(f"{path}.indicator: unsupported stateful indicator {indicator}")
 
     def _eval_stateful_math(self, node: dict[str, Any], path: str, symbol: str, date: pd.Timestamp) -> float:
         op = node["op"]
@@ -328,9 +662,55 @@ class LongOnlyBacktester:
         current_idx = self.index.get_loc(date)
         return int(current_idx - entry_idx)
 
+    def _highest_close_since_entry(self, position: Position, date: pd.Timestamp) -> float:
+        close_series = self.close_prices[position.symbol].loc[position.entry_date : date]
+        return float(close_series.max())
+
     def _position_return(self, position: Position, date: pd.Timestamp) -> float:
         close_price = self._price(position.symbol, date, "close")
         return (close_price - position.entry_price) / position.entry_price
+
+    def _shifted_date(self, date: pd.Timestamp, shift: int) -> pd.Timestamp:
+        if shift == 0:
+            return date
+        current_idx = self.index.get_loc(date)
+        shifted_idx = current_idx - shift
+        if shifted_idx < 0:
+            return self.index[0]
+        return self.index[shifted_idx]
+
+    def _stateful_source_series(self, symbol: str, source: str) -> pd.Series:
+        symbol = symbol.upper()
+        if symbol not in self.market_data:
+            raise BacktestError(f"Missing market data for referenced symbol: {symbol}")
+        return self.market_data[symbol][source].reindex(self.index)
+
+    def _stateful_source_value(self, symbol: str, source: str, date: pd.Timestamp) -> float:
+        return float(self._stateful_source_series(symbol, source).loc[date])
+
+    def _stateful_rsi_value(self, source: pd.Series, window: int) -> float:
+        delta = source.diff()
+        gains = delta.clip(lower=0).rolling(window, min_periods=window).mean()
+        losses = (-delta.clip(upper=0)).rolling(window, min_periods=window).mean()
+        rs = gains / losses.replace(0, np.nan)
+        return float((100 - (100 / (1 + rs))).iloc[-1])
+
+    def _stateful_atr_value(self, symbol: str, date: pd.Timestamp, window: int) -> float:
+        high = self._stateful_source_series(symbol, "high").loc[:date]
+        low = self._stateful_source_series(symbol, "low").loc[:date]
+        close = self._stateful_source_series(symbol, "close").loc[:date]
+        if len(close) < window:
+            return float("nan")
+        prev_close = close.shift(1)
+        true_range = pd.concat(
+            [
+                high - low,
+                (high - prev_close).abs(),
+                (low - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        return float(true_range.rolling(window, min_periods=window).mean().iloc[-1])
 
     def _portfolio_value(self, date: pd.Timestamp, price_type: str) -> float:
         value = self.cash

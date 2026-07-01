@@ -4,7 +4,7 @@ import pandas as pd
 
 from zhquant.backtest import BacktestResult
 from zhquant.compiler import CompiledSignals
-from zhquant.reporting import format_backtest_report
+from zhquant.reporting import format_backtest_report, format_diagnostic_report
 
 
 class ReportingTest(unittest.TestCase):
@@ -13,6 +13,20 @@ class ReportingTest(unittest.TestCase):
         result = BacktestResult(
             strategy_name="demo",
             equity_curve=pd.DataFrame({"equity": [1000, 1100]}, index=index),
+            order_log=pd.DataFrame(
+                [
+                    {
+                        "symbol": "AAPL",
+                        "date": index[0],
+                        "action": "BUY",
+                        "price": 100.0,
+                        "shares": 10.0,
+                        "notional": 1000.0,
+                        "commission": 1.0,
+                        "reason": "entry_signal",
+                    }
+                ]
+            ),
             trade_log=pd.DataFrame(
                 [
                     {
@@ -54,7 +68,29 @@ class ReportingTest(unittest.TestCase):
                 exit=pd.DataFrame(),
                 stateful_exit_rules=(),
                 data_dependencies=(),
+                diagnostics={},
             ),
+            current_actions=pd.DataFrame(
+                [
+                    {
+                        "symbol": "AAPL",
+                        "signal_date": index[1],
+                        "action": "BUY",
+                        "reason": "entry_signal",
+                        "in_position": False,
+                        "entry_signal": True,
+                        "exit_signal": False,
+                        "execution": "next_open",
+                    }
+                ]
+            ),
+            diagnostic_log=pd.DataFrame(
+                [
+                    {"symbol": "AAPL", "signal_date": index[0], "market_ok": True, "final_buy_signal": False},
+                    {"symbol": "AAPL", "signal_date": index[1], "market_ok": True, "final_buy_signal": True},
+                ]
+            ),
+            diagnostic_pass_rates={"market_ok": 1.0, "final_buy_signal": 0.5},
         )
 
         report = format_backtest_report(result, "AAPL", "strategy.json", "1mo")
@@ -62,8 +98,15 @@ class ReportingTest(unittest.TestCase):
         self.assertIn("Net P/L: $+100.00", report)
         self.assertIn("Gross Profit From Winning Trades: $100.00", report)
         self.assertIn("Gross Loss From Losing Trades: $0.00", report)
+        self.assertIn("Current Action", report)
+        self.assertIn("BUY", report)
+
+        diagnostics = format_diagnostic_report(result)
+
+        self.assertIn("market_ok: 100.00%", diagnostics)
+        self.assertIn("final_buy_signal: 50.00%", diagnostics)
+        self.assertIn("Daily Conditions", diagnostics)
 
 
 if __name__ == "__main__":
     unittest.main()
-

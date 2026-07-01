@@ -1,0 +1,31 @@
+{
+  "name": "semiconductor_memory_momentum_rotation_v2",
+  "description": "Monthly cross-sectional momentum rotation across semiconductor and memory leaders. Select the strongest three positive-momentum stocks by 126-day return and rebalance at the next open.",
+  "timeframe": "1d",
+  "universe": {
+    "type": "static_list",
+    "symbols": ["AMD", "MU", "SNDK", "NVDA", "AVGO", "TSM", "MRVL", "IREN", "NBIS", "INTC", "QCOM","ASML", "LITE", "ETN","ANET", "ZS" ]
+  },
+  "rotation": {
+    "score": {
+      "indicator": "return",
+      "source": "close",
+      "window": 126
+    },
+    "top_n": 3,
+    "rebalance": "monthly",
+    "require_positive_score": true
+  },
+  "risk": {
+    "execution": "next_open",
+    "slippage_bps": 5,
+    "commission_bps": 1,
+    "stop_loss_pct": -0.3,
+    "ma200_exit": true,
+    "atr_trailing_stop": {
+      "enabled": true,
+      "multiple": 4.5,
+      "activation_profit_pct": 0.25
+    }
+  }
+}

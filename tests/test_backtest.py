@@ -125,6 +125,113 @@ class BacktestTest(unittest.TestCase):
         self.assertEqual(result.trade_log.iloc[0]["exit_reason"], "take_profit")
         self.assertGreater(result.trade_log.iloc[0]["net_return"], 0)
 
+    def test_current_action_buy_when_latest_entry_signal_is_true(self) -> None:
+        strategy = base_strategy(
+            {
+                "op": ">=",
+                "left": {"field": "holding_days"},
+                "right": 20,
+            }
+        )
+        market_data = {"AAA": make_market([10, 9, 11])}
+
+        result = run_backtest(strategy, market_data, initial_cash=10_000)
+
+        action = result.current_actions.iloc[0]
+        self.assertEqual(action["symbol"], "AAA")
+        self.assertEqual(action["action"], "BUY")
+        self.assertEqual(action["reason"], "entry_signal")
+        self.assertFalse(action["in_position"])
+        self.assertEqual(action["execution"], "next_open")
+
+    def test_current_action_sell_when_latest_exit_signal_is_true(self) -> None:
+        strategy = base_strategy(
+            {
+                "op": ">=",
+                "left": {"field": "holding_days"},
+                "right": 1,
+            }
+        )
+        market_data = {"AAA": make_market([10, 11, 12, 13])}
+
+        result = run_backtest(strategy, market_data, initial_cash=10_000)
+
+        action = result.current_actions.iloc[0]
+        self.assertEqual(action["symbol"], "AAA")
+        self.assertEqual(action["action"], "SELL")
+        self.assertEqual(action["reason"], "holding_days")
+        self.assertTrue(action["in_position"])
+
+    def test_stateful_exit_can_use_entry_price_and_atr_indicator(self) -> None:
+        strategy = base_strategy(
+            {
+                "op": "<",
+                "left": {"indicator": "close"},
+                "right": {
+                    "op": "-",
+                    "left": {"field": "entry_price"},
+                    "right": {
+                        "op": "*",
+                        "left": {"indicator": "atr", "window": 3},
+                        "right": 0.5,
+                    },
+                },
+            },
+            risk_extra={"slippage_bps": 0, "commission_bps": 0},
+        )
+        market_data = {"AAA": make_market([10, 11, 12, 13, 8, 8, 8])}
+
+        result = run_backtest(strategy, market_data, initial_cash=10_000)
+
+        self.assertFalse(result.trade_log.empty)
+        self.assertEqual(result.trade_log.iloc[0]["exit_reason"], "stateful_exit")
+        self.assertLess(result.trade_log.iloc[0]["net_return"], 0)
+
+    def test_add_entry_pyramids_into_existing_position(self) -> None:
+        strategy = base_strategy(
+            {
+                "op": ">=",
+                "left": {"field": "holding_days"},
+                "right": 3,
+            },
+            risk_extra={"max_additions": 1, "add_position_pct": 0.25, "slippage_bps": 0, "commission_bps": 0},
+        )
+        strategy["add_entry"] = {
+            "op": ">",
+            "left": {"indicator": "close"},
+            "right": {"indicator": "sma", "source": "close", "window": 2},
+        }
+        market_data = {"AAA": make_market([10, 11, 12, 13, 14, 15])}
+
+        result = run_backtest(strategy, market_data, initial_cash=10_000)
+
+        self.assertFalse(result.trade_log.empty)
+        self.assertEqual(result.trade_log.iloc[0]["add_count"], 1)
+        self.assertGreater(result.trade_log.iloc[0]["shares"], 10_000 * 0.5 / 12)
+        self.assertEqual(result.order_log["action"].tolist(), ["BUY", "ADD", "SELL"])
+
+    def test_reduce_exit_sells_part_of_existing_position(self) -> None:
+        strategy = base_strategy(
+            {
+                "op": ">=",
+                "left": {"field": "holding_days"},
+                "right": 10,
+            },
+            risk_extra={"reduce_position_pct": 0.5, "slippage_bps": 0, "commission_bps": 0},
+        )
+        strategy["reduce_exit"] = {
+            "op": "==",
+            "left": {"indicator": "close"},
+            "right": 13,
+        }
+        market_data = {"AAA": make_market([10, 11, 12, 13, 14, 15])}
+
+        result = run_backtest(strategy, market_data, initial_cash=10_000)
+
+        self.assertIn("REDUCE", result.order_log["action"].tolist())
+        reduced_trade = result.trade_log[result.trade_log["exit_reason"] == "reduce_exit"].iloc[0]
+        self.assertAlmostEqual(reduced_trade["shares"], result.order_log.iloc[0]["shares"] * 0.5)
+
 
 if __name__ == "__main__":
     unittest.main()

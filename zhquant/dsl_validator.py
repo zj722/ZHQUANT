@@ -40,9 +40,18 @@ INDICATORS = {
     "return",
     "rolling_max",
     "rolling_min",
+    "rolling_count",
+    "rolling_quantile",
     "zscore",
 }
-FIELDS = {"holding_days", "position_return", "current_weight", "cash_pct"}
+FIELDS = {
+    "holding_days",
+    "position_return",
+    "current_weight",
+    "cash_pct",
+    "entry_price",
+    "highest_close_since_entry",
+}
 EXECUTION_MODES = {"next_open", "next_close", "same_close"}
 
 
@@ -86,7 +95,23 @@ class StrategyDSLValidator:
         if not self._require_object(value, path):
             return
 
-        allowed = {"name", "description", "timeframe", "universe", "entry", "exit", "risk"}
+        if "rotation" in value:
+            self._rotation_strategy(value, path)
+            return
+
+        allowed = {
+            "name",
+            "description",
+            "timeframe",
+            "universe",
+            "entry",
+            "add_entry",
+            "exit",
+            "reduce_exit",
+            "trim_exit",
+            "risk",
+            "diagnostics",
+        }
         self._unknown_keys(value, allowed, path)
 
         self._required_string(value, "name", path)
@@ -99,8 +124,113 @@ class StrategyDSLValidator:
 
         self._universe(value.get("universe"), f"{path}.universe")
         self._condition_tree(value.get("entry"), f"{path}.entry", context="entry")
+        if "add_entry" in value:
+            self._condition_tree(value["add_entry"], f"{path}.add_entry", context="entry")
         self._condition_tree(value.get("exit"), f"{path}.exit", context="exit")
+        if "reduce_exit" in value:
+            self._condition_tree(value["reduce_exit"], f"{path}.reduce_exit", context="exit")
+        if "trim_exit" in value:
+            self._condition_tree(value["trim_exit"], f"{path}.trim_exit", context="exit")
         self._risk(value.get("risk"), f"{path}.risk")
+        if "diagnostics" in value:
+            self._diagnostics(value["diagnostics"], f"{path}.diagnostics")
+
+    def _rotation_strategy(self, value: dict[str, Any], path: str) -> None:
+        allowed = {
+            "name",
+            "description",
+            "timeframe",
+            "universe",
+            "rotation",
+            "risk",
+        }
+        self._unknown_keys(value, allowed, path)
+
+        self._required_string(value, "name", path)
+        if "description" in value and not isinstance(value["description"], str):
+            self._error(f"{path}.description", "must be a string")
+
+        timeframe = value.get("timeframe")
+        if timeframe not in TIMEFRAMES:
+            self._error(f"{path}.timeframe", f"must be one of {sorted(TIMEFRAMES)}")
+
+        self._universe(value.get("universe"), f"{path}.universe")
+        self._rotation(value.get("rotation"), f"{path}.rotation")
+        self._rotation_risk(value.get("risk"), f"{path}.risk")
+
+    def _rotation(self, value: Any, path: str) -> None:
+        if not self._require_object(value, path):
+            return
+        allowed = {"score", "top_n", "rebalance", "require_positive_score"}
+        self._unknown_keys(value, allowed, path)
+
+        score = value.get("score")
+        if not self._require_object(score, f"{path}.score"):
+            return
+        self._unknown_keys(score, {"indicator", "source", "window"}, f"{path}.score")
+        if score.get("indicator") != "return":
+            self._error(f"{path}.score.indicator", "must be return")
+        if score.get("source") != "close":
+            self._error(f"{path}.score.source", "must be close")
+        self._positive_int(score.get("window"), f"{path}.score.window", min_value=2, max_value=252)
+
+        self._positive_int(value.get("top_n"), f"{path}.top_n", min_value=1, max_value=100)
+        if value.get("rebalance") not in {"weekly", "monthly"}:
+            self._error(f"{path}.rebalance", "must be weekly or monthly")
+        if "require_positive_score" in value and not isinstance(value["require_positive_score"], bool):
+            self._error(f"{path}.require_positive_score", "must be boolean")
+
+    def _rotation_risk(self, value: Any, path: str) -> None:
+        if not self._require_object(value, path):
+            return
+        allowed = {"execution", "slippage_bps", "commission_bps", "stop_loss_pct", "ma200_exit", "atr_trailing_stop"}
+        self._unknown_keys(value, allowed, path)
+
+        if value.get("execution") != "next_open":
+            self._error(f"{path}.execution", "must be next_open")
+        self._number_range(
+            value.get("slippage_bps"),
+            f"{path}.slippage_bps",
+            min_value=0,
+            max_value=1000,
+            include_min=True,
+        )
+        self._number_range(
+            value.get("commission_bps"),
+            f"{path}.commission_bps",
+            min_value=0,
+            max_value=1000,
+            include_min=True,
+        )
+        if "stop_loss_pct" in value:
+            self._number_range(
+                value["stop_loss_pct"],
+                f"{path}.stop_loss_pct",
+                min_value=-1,
+                max_value=0,
+                include_max=False,
+            )
+        if "ma200_exit" in value and not isinstance(value["ma200_exit"], bool):
+            self._error(f"{path}.ma200_exit", "must be boolean")
+        if "atr_trailing_stop" in value:
+            self._atr_trailing_stop(value["atr_trailing_stop"], f"{path}.atr_trailing_stop")
+
+    def _atr_trailing_stop(self, value: Any, path: str) -> None:
+        if not self._require_object(value, path):
+            return
+        self._unknown_keys(value, {"enabled", "multiple", "activation_profit_pct"}, path)
+        if "enabled" in value and not isinstance(value["enabled"], bool):
+            self._error(f"{path}.enabled", "must be boolean")
+        if "multiple" in value:
+            self._number_range(value["multiple"], f"{path}.multiple", min_value=0, max_value=20)
+        if "activation_profit_pct" in value:
+            self._number_range(
+                value["activation_profit_pct"],
+                f"{path}.activation_profit_pct",
+                min_value=0,
+                max_value=10,
+                include_min=True,
+            )
 
     def _universe(self, value: Any, path: str) -> None:
         if not self._require_object(value, path):
@@ -200,13 +330,37 @@ class StrategyDSLValidator:
             return
 
         if indicator in BASE_SERIES:
-            self._unknown_keys(value, {"indicator", "symbol"}, path)
+            self._unknown_keys(value, {"indicator", "symbol", "shift"}, path)
             self._optional_symbol(value, path)
+            self._optional_shift(value, path)
             return
 
-        allowed = {"indicator", "source", "window", "symbol"}
+        if indicator == "rolling_count":
+            self._unknown_keys(value, {"indicator", "condition", "window", "shift"}, path)
+            if "condition" not in value:
+                self._error(f"{path}.condition", "is required")
+            else:
+                self._condition_tree(value["condition"], f"{path}.condition", context="entry")
+            self._positive_int(value.get("window"), f"{path}.window", min_value=1, max_value=252)
+            self._optional_shift(value, path)
+            return
+
+        if indicator == "rolling_quantile":
+            self._unknown_keys(value, {"indicator", "source", "window", "return_window", "quantile", "symbol", "shift"}, path)
+            source = value.get("source")
+            if source not in BASE_SERIES:
+                self._error(f"{path}.source", f"must be one of {sorted(BASE_SERIES)}")
+            self._optional_symbol(value, path)
+            self._positive_int(value.get("window"), f"{path}.window", min_value=1, max_value=252)
+            self._positive_int(value.get("return_window"), f"{path}.return_window", min_value=1, max_value=252)
+            self._number_range(value.get("quantile"), f"{path}.quantile", min_value=0, max_value=1, include_min=True)
+            self._optional_shift(value, path)
+            return
+
+        allowed = {"indicator", "source", "window", "symbol", "shift"}
         self._unknown_keys(value, allowed, path)
         self._optional_symbol(value, path)
+        self._optional_shift(value, path)
 
         if indicator == "atr":
             if "source" in value:
@@ -224,7 +378,7 @@ class StrategyDSLValidator:
         if field not in FIELDS:
             self._error(f"{path}.field", f"must be one of {sorted(FIELDS)}")
             return
-        if context == "entry" and field in {"holding_days", "position_return", "current_weight"}:
+        if context == "entry" and field in {"holding_days", "position_return", "current_weight", "entry_price", "highest_close_since_entry"}:
             self._error(f"{path}.field", f"{field} is only valid after a position exists")
 
     def _math_expression(self, value: dict[str, Any], path: str, context: str) -> None:
@@ -274,6 +428,10 @@ class StrategyDSLValidator:
             "commission_bps",
             "stop_loss_pct",
             "take_profit_pct",
+            "max_additions",
+            "add_position_pct",
+            "reduce_position_pct",
+            "trim_position_pct",
         }
         self._unknown_keys(value, allowed, path)
 
@@ -307,6 +465,26 @@ class StrategyDSLValidator:
             )
         if "take_profit_pct" in value:
             self._number_range(value["take_profit_pct"], f"{path}.take_profit_pct", min_value=0, max_value=10)
+        if "max_additions" in value:
+            self._positive_int(value["max_additions"], f"{path}.max_additions", min_value=0, max_value=10)
+        if "add_position_pct" in value:
+            self._number_range(value["add_position_pct"], f"{path}.add_position_pct", min_value=0, max_value=1)
+        if "reduce_position_pct" in value:
+            self._number_range(value["reduce_position_pct"], f"{path}.reduce_position_pct", min_value=0, max_value=1)
+        if "trim_position_pct" in value:
+            self._number_range(value["trim_position_pct"], f"{path}.trim_position_pct", min_value=0, max_value=1)
+
+    def _diagnostics(self, value: Any, path: str) -> None:
+        if not self._require_object(value, path):
+            return
+        if not value:
+            self._error(path, "must contain at least one named diagnostic condition")
+            return
+        for name, condition in value.items():
+            if not isinstance(name, str) or not name.strip():
+                self._error(path, "diagnostic names must be non-empty strings")
+                continue
+            self._condition_tree(condition, f"{path}.{name}", context="entry")
 
     def _required_string(self, value: dict[str, Any], key: str, path: str) -> None:
         if key not in value:
@@ -347,6 +525,11 @@ class StrategyDSLValidator:
         symbol = value["symbol"]
         if not isinstance(symbol, str) or not symbol.strip():
             self._error(f"{path}.symbol", "must be a non-empty string")
+
+    def _optional_shift(self, value: dict[str, Any], path: str) -> None:
+        if "shift" not in value:
+            return
+        self._positive_int(value["shift"], f"{path}.shift", min_value=0, max_value=252)
 
     def _unknown_keys(self, value: dict[str, Any], allowed: set[str], path: str) -> None:
         for key in sorted(set(value) - allowed):
